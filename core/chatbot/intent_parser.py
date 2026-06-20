@@ -1,0 +1,165 @@
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+
+from common.utils import normalize_text
+
+
+@dataclass(frozen=True)
+class UserIntent:
+    raw_text: str
+    media_type: str | None = None
+    genres: list[str] = field(default_factory=list)
+    moods: list[str] = field(default_factory=list)
+    era: str | None = None
+    similar_to: str | None = None
+    language: str | None = None
+    seed_titles: list[str] = field(default_factory=list)  # LLM-suggested titles to seed TMDB recommendations
+    year_min: int | None = None  # earliest release year ("son 5 yıl" → 2021)
+    year_max: int | None = None  # latest release year
+
+
+class IntentParser:
+    """Small deterministic parser used until an LLM provider is connected."""
+
+    MEDIA_KEYWORDS = {
+        "movie": ("film", "movie", "sinema"),
+        "series": ("dizi", "series", "show"),
+        "music": ("müzik", "music", "song", "şarkı", "playlist"),
+        "game": ("oyun", "game"),
+    }
+
+    GENRE_KEYWORDS = {
+        "crime": ("suç", "crime", "detective", "dedektif", "narkotik", "cinayet",
+                  "narcotic", "drug", "drugs", "murder", "killer", "mafia", "mob",
+                  "heist", "uyuşturucu", "katil"),
+        "mystery": ("gizem", "mystery", "mysterious", "gizemli", "paranormal"),
+        "drama": ("dram", "drama", "duygusal", "dramatik", "düşündürücü", "derin", "gerçekçi"),
+        "comedy": ("komedi", "comedy", "funny", "güldürü", "komik", "eğlenceli", "neşeli", "gülünç"),
+        "sci-fi": ("bilim kurgu", "sci-fi", "science fiction", "cyberpunk", "uzay", "fütürist",
+                   "space", "robot", "alien", "future", "distopik", "distopia", "dystopia"),
+        "horror": ("korku", "horror", "gerilim", "thriller", "scary", "haunted", "ürkütücü", "kabus"),
+        "action": ("aksiyon", "action", "macera", "adventure", "fight", "war", "savaş", "dövüş"),
+        "racing": ("yarış", "racing", "race", "sürüş", "formula", "motor yarış",
+                   "araba yarışı", "araba", "hızlı araba", "motorsport", "nascar",
+                   "f1", "gran turismo", "need for speed", "fast furious",
+                   "street racing", "drift", "drag race"),
+        "sports": ("spor", "sports", "futbol", "football", "basketbol", "basketball",
+                   "boks", "boxing", "güreş", "wrestling", "nba", "olimpiyat", "olympics"),
+        "fantasy": ("fantastik", "fantastic", "fantasy", "ejderha", "dragon", "büyü", "magic",
+                    "sihir", "orta çağ", "medieval", "kılıç", "sword", "wizard", "büyücü",
+                    "taht", "throne", "elf", "goblin", "myth", "mitoloji", "efsane",
+                    "kingdom", "krallık", "şövalye", "knight", "intrika", "entrika"),
+        "romance": ("romantik", "romance", "aşk", "sevgi", "ask", "love story"),
+        "animation": ("animasyon", "animation", "anime", "çizgi"),
+        "documentary": ("belgesel", "documentary"),
+        "chill": ("sakin", "chill", "relax", "rahatlatıcı", "feel good"),
+        "strategy": ("strateji", "strategy", "taktik", "tactical", "savaş strateji", "yönetim"),
+    }
+
+    MOOD_KEYWORDS = {
+        "dark": ("karanlık", "dark", "kasvetli", "ağır"),
+        "calm": ("sakin", "calm", "soft", "rahat", "huzurlu"),
+        "nostalgic": ("nostaljik", "nostalgic", "90'lar", "80'ler"),
+        "energetic": ("enerjik", "energetic", "hızlı"),
+        "surreal": ("tuhaf", "surreal", "garip", "absürt", "absürd", "absurd", "abzürt",
+                    "saçma", "çılgın", "çılgınca", "geğirme", "geğirmeli", "sıçma", "sıçmalı"),
+    }
+
+    LANGUAGE_KEYWORDS = {
+        "tr": ("türk", "türkçe", "yerli", "turkish", "turkey", "anadolu"),
+        "ko": ("kore", "korean", "kdrama", "k-drama"),
+        "ja": ("japon", "japanese", "japan"),
+        "es": ("ispanyol", "spanish", "spain"),
+        "fr": ("fransız", "french", "france"),
+        "it": ("italyan", "italian", "italy"),
+        "de": ("alman", "almanca", "german", "germany", "deutschland", "avusturya", "austria"),
+        "zh": ("çin", "chinese", "china", "çince", "mandarin"),
+        "hi": ("hint", "hindi", "bollywood", "indian", "india"),
+        "pt": ("portekiz", "brezilya", "portuguese", "brazil", "brasil"),
+        "sv": ("iskandinav", "İsveç", "nordic", "swedish", "norveç", "norwegian", "danimarka", "danish"),
+    }
+
+    def parse(self, text: str) -> UserIntent:
+        normalized = normalize_text(text)
+        similar_to = self._extract_similar_to(text)
+        # Strip the similar_to title from normalized text before detecting media_type
+        # so "game" in "Game of Thrones gibi" doesn't register as media_type=game.
+        text_without_title = normalized
+        if similar_to:
+            text_without_title = normalized.replace(similar_to.lower(), "")
+        media_type = self._first_match(text_without_title, self.MEDIA_KEYWORDS)
+        genres = self._all_matches(normalized, self.GENRE_KEYWORDS)
+        moods = self._all_matches(normalized, self.MOOD_KEYWORDS)
+        era = self._extract_era(normalized)
+        language = self._first_match(normalized, self.LANGUAGE_KEYWORDS)
+
+        return UserIntent(
+            raw_text=text,
+            media_type=media_type,
+            genres=genres,
+            moods=moods,
+            era=era,
+            similar_to=similar_to,
+            language=language,
+        )
+
+    def _first_match(self, text: str, dictionary: dict[str, tuple[str, ...]]) -> str | None:
+        matches = self._all_matches(text, dictionary)
+        return matches[0] if matches else None
+
+    def _first_word_match(self, text: str, dictionary: dict[str, tuple[str, ...]]) -> str | None:
+        """Like _first_match but requires keywords to appear as whole words."""
+        for label, keywords in dictionary.items():
+            for kw in keywords:
+                pattern = r"(?<![a-zÀ-ɏ])" + re.escape(kw) + r"(?![a-zÀ-ɏ])"
+                if re.search(pattern, text, re.IGNORECASE):
+                    return label
+        return None
+
+    def _all_matches(self, text: str, dictionary: dict[str, tuple[str, ...]]) -> list[str]:
+        found: list[str] = []
+        for label, keywords in dictionary.items():
+            if any(keyword in text for keyword in keywords):
+                found.append(label)
+        return found
+
+    def _extract_era(self, text: str) -> str | None:
+        # Match "1970s", "70s", "70'lar", "70'ler", "2000li", "2000ler", etc.
+        m = re.search(r"\b(19[4-9]\d|20[012]\d)[''']?(?:s|li|ler|lar|lı)?\b", text)
+        if m:
+            year = int(m.group(1))
+            return f"{(year // 10) * 10}s"
+        m = re.search(r"\b([4-9]\d)[''']?(lar|ler|li|lı|s)?\b", text)
+        if m:
+            decade = int(m.group(1))
+            if 40 <= decade <= 99:
+                return f"19{decade}s"
+        return None
+
+    def _extract_similar_to(self, text: str) -> str | None:
+        # "X gibi", "X tarzı", "like X", "similar to X"
+        lowered = text.lower()
+
+        # Before-marker patterns: "Breaking Bad gibi", "Twin Peaks tarzı"
+        before_markers = ("tarzı", "gibi")
+        for marker in before_markers:
+            if marker in lowered:
+                idx = lowered.index(marker)
+                before = text[:idx].strip().rstrip(",.")
+                words = before.split()
+                if words:
+                    # take up to last 4 words (handles multi-word titles)
+                    return " ".join(words[-4:])
+
+        # After-marker patterns: "like Breaking Bad", "similar to The Wire"
+        after_patterns = (r"like\s+(.+?)(?:\s+(?:gibi|tarzı|series|dizi|film|movie)|$)",
+                          r"similar to\s+(.+?)(?:\s+(?:series|dizi|film|movie)|$)")
+        for pattern in after_patterns:
+            m = re.search(pattern, lowered)
+            if m:
+                candidate = m.group(1).strip().title()
+                if candidate:
+                    return candidate
+        return None
