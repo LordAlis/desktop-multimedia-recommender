@@ -32,6 +32,10 @@ The recommendation engine works **without an LLM** — AI is optional and enhanc
 - **Local caching** — SQLite database stores fetched metadata
 
 ---
+## Screenshot
+<img width="1182" height="751" alt="User attachment" src="https://github.com/user-attachments/assets/56d950c1-487e-4372-8aa6-f2d4642f317a" />
+
+---
 
 ## Quick Start
 
